@@ -1,0 +1,1224 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>書き込めるキャンバス</title>
+  <meta name="viewport" content="width=1440,initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { overflow: hidden; background: #F8FAFC; }
+    #root { width: 100vw; height: 100vh; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #F1F5F9; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+    input[type=color] { -webkit-appearance: none; width: 28px; height: 28px; border-radius: 6px; border: 1px solid #E2E8F0; padding: 2px; cursor: pointer; background: none; }
+  </style>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="env,react">
+  const { useState, useEffect, useRef } = React;
+
+  const STORAGE_KEY  = 'canvas-b-v4';
+  const CANVAS_W     = 2400;
+  const CANVAS_H     = 1600;
+  const MAX_HISTORY  = 60;
+  const FONT         = '"Helvetica Neue",Helvetica,Arial,"源ノ角ゴシック Code JP","Noto Sans JP",sans-serif';
+
+  const DEFAULT_TYPES = [
+    { id: 'yellow', bg: '#FEF3C7', border: '#F59E0B', label: '黄' },
+    { id: 'pink',   bg: '#FCE7F3', border: '#EC4899', label: '桃' },
+    { id: 'blue',   bg: '#DBEAFE', border: '#3B82F6', label: '青' },
+    { id: 'green',  bg: '#D1FAE5', border: '#10B981', label: '緑' },
+  ];
+
+  const SEED_NOTES = [
+    { id:'n1',  x:80,   y:120, w:200, h:110, type:'blue',   text:'キックオフ 4/15\n次回 水曜 14:00', fs:14, fw:400 },
+    { id:'n2',  x:300,  y:130, w:200, h:110, type:'blue',   text:'議事録 4/18\n参加: 田/佐/私',       fs:14, fw:400 },
+    { id:'n3',  x:120,  y:270, w:200, h:110, type:'blue',   text:'顧客ヒアリング\n90分 / 4/19',        fs:14, fw:400 },
+    { id:'n4',  x:600,  y:120, w:200, h:110, type:'yellow', text:'アイデア: インボックス型\n定番で安心', fs:14, fw:400 },
+    { id:'n5',  x:820,  y:110, w:200, h:110, type:'pink',   text:'アイデア: キャンバス型\n発散→整理',   fs:14, fw:400 },
+    { id:'n6',  x:600,  y:270, w:200, h:110, type:'green',  text:'アイデア: タイムライン\n振り返りに強い', fs:14, fw:400 },
+    { id:'n7',  x:820,  y:270, w:200, h:110, type:'yellow', text:'アイデア: AI丸投げ\nプロンプトだけ',  fs:14, fw:400 },
+    { id:'n8',  x:160,  y:460, w:200, h:100, type:'blue',   text:'参考: heptabase\nカードUI',           fs:14, fw:400 },
+    { id:'n9',  x:380,  y:470, w:200, h:100, type:'blue',   text:'参考: notion\n階層型',                fs:14, fw:400 },
+    { id:'n10', x:600,  y:470, w:200, h:100, type:'pink',   text:'やること: 競合調査\n@私 / 今週',      fs:14, fw:400 },
+    { id:'n11', x:820,  y:470, w:200, h:100, type:'pink',   text:'やること: プロト作成\n@佐 / 5/1',     fs:14, fw:400 },
+    { id:'n12', x:1040, y:220, w:200, h:100, type:'yellow', text:'?\nどこに入る？',                     fs:14, fw:400 },
+  ];
+
+  function uid() { return 'i' + Math.random().toString(36).slice(2,10); }
+  function getType(types, id) { return types.find(t => t.id === id) || types[0] || { bg:'#FFF', border:'#999', label:'?' }; }
+  function getCanvasPt(e, ref, zoom) {
+    const r = ref.current.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left + ref.current.scrollLeft) / zoom,
+      y: (e.clientY - r.top  + ref.current.scrollTop)  / zoom,
+    };
+  }
+
+  /* アンカー付箋の近くで重なりのない座標を探す */
+  function positionNearAnchor(anchor, allNotes, w = 200, h = 100) {
+    const PAD = 16;
+    const candidates = [
+      { x: anchor.x + anchor.w + PAD, y: anchor.y },
+      { x: anchor.x, y: anchor.y + anchor.h + PAD },
+      { x: Math.max(0, anchor.x - w - PAD), y: anchor.y },
+      { x: anchor.x + anchor.w + PAD, y: anchor.y + anchor.h + PAD },
+      { x: anchor.x, y: Math.max(0, anchor.y - h - PAD) },
+    ];
+    for (const pos of candidates) {
+      if (pos.x < 0 || pos.y < 0) continue;
+      const overlaps = allNotes.some(n =>
+        pos.x < n.x + n.w + 8 && pos.x + w + 8 > n.x &&
+        pos.y < n.y + n.h + 8 && pos.y + h  + 8 > n.y
+      );
+      if (!overlaps) return pos;
+    }
+    return { x: Math.min(CANVAS_W - w - 20, anchor.x + 20), y: Math.min(CANVAS_H - h - 20, anchor.y + 20) };
+  }
+
+  /* 選択中の付箋の近くに優先配置し、選択がなければ最後の付箋の近くに配置 */
+  function resolveNewPosition(allNotes, selectedIds, w = 200, h = 100) {
+    const selectedNotes = allNotes.filter(n => selectedIds && selectedIds.has(n.id));
+    if (selectedNotes.length > 0) {
+      const anchor = selectedNotes[selectedNotes.length - 1];
+      return positionNearAnchor(anchor, allNotes, w, h);
+    }
+    if (allNotes.length > 0) {
+      return positionNearAnchor(allNotes[allNotes.length - 1], allNotes, w, h);
+    }
+    return { x: 80, y: 80 };
+  }
+
+  /* キャンバスクリック時のランダム配置（重なり回避） */
+  function findNonOverlappingPosition(existingNotes, w = 200, h = 100) {
+    const PAD = 12;
+    for (let i = 0; i < 50; i++) {
+      const x = 40 + Math.random() * 700;
+      const y = 40 + Math.random() * 500;
+      const overlaps = existingNotes.some(n =>
+        x < n.x + n.w + PAD && x + w + PAD > n.x &&
+        y < n.y + n.h + PAD && y + h  + PAD > n.y
+      );
+      if (!overlaps) return { x, y };
+    }
+    const cols = Math.max(1, Math.ceil(Math.sqrt(existingNotes.length + 1)));
+    const idx  = existingNotes.length;
+    return { x: 40 + (idx % cols) * (w + 20), y: 40 + Math.floor(idx / cols) * (h + 20) };
+  }
+
+  /* ── ImageThumb（付箋内サムネイル）── */
+  function ImageThumb({ img, onOpen, onDelete }) {
+    const [hovering, setHovering] = useState(false);
+    return (
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); onOpen(img.src); }}
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
+        style={{
+          position: 'relative', width: 44, height: 44, borderRadius: 5,
+          overflow: 'hidden', cursor: 'pointer', flexShrink: 0,
+          border: '1px solid rgba(0,0,0,0.14)',
+          boxShadow: hovering ? '0 2px 8px rgba(0,0,0,0.18)' : '0 1px 3px rgba(0,0,0,0.08)',
+          transition: 'box-shadow 0.15s',
+        }}
+      >
+        <img src={img.src} alt="" draggable={false}
+          style={{ width:'100%', height:'100%', objectFit:'cover', display:'block', pointerEvents:'none' }}
+        />
+        {hovering && onDelete && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            style={{
+              position:'absolute', top:2, right:2, width:16, height:16,
+              borderRadius:'50%', background:'rgba(220,38,38,0.88)', color:'#fff',
+              border:'none', cursor:'pointer', fontSize:10,
+              display:'flex', alignItems:'center', justifyContent:'center',
+              padding:0, lineHeight:1, fontFamily:FONT,
+            }}
+          >×</button>
+        )}
+      </div>
+    );
+  }
+
+  /* ── StickyNote ── */
+  function StickyNote({ note, types, selected, onSelect, onChange, onDelete, onDragStart, onResizeStart, onOpenLightbox, onAttachImage, onDeleteImage }) {
+    const [editing, setEditing] = useState(false);
+    const taRef = useRef(null);
+    const t = getType(types, note.type);
+    const images = note.images || [];
+
+    useEffect(() => { if (editing && taRef.current) { taRef.current.focus(); } }, [editing]);
+
+    const textDecoration = [
+      note.underline && 'underline',
+      note.strikethrough && 'line-through',
+    ].filter(Boolean).join(' ') || 'none';
+
+    return (
+      <div
+        style={{
+          position:'absolute', left:note.x, top:note.y, width:note.w, minHeight:note.h,
+          background:t.bg, borderRadius:6, padding:'10px 12px',
+          border: selected ? `2px solid ${t.border}` : '1px solid rgba(15,23,42,0.08)',
+          borderLeft:`3px solid ${t.border}`,
+          boxShadow: selected ? '0 8px 24px rgba(15,23,42,0.12)' : '0 1px 3px rgba(15,23,42,0.06)',
+          fontFamily:FONT, fontSize:note.fs||14, fontWeight:note.fw||400,
+          fontStyle: note.fontStyle || 'normal',
+          textDecoration,
+          lineHeight:1.5, color:'#0F172A', whiteSpace:'pre-wrap',
+          cursor: editing ? 'text' : 'move', userSelect: editing ? 'text' : 'none',
+          zIndex: selected ? 20 : 5,
+        }}
+        onMouseDown={(e) => { if (editing) return; onSelect(note.id, e); onDragStart(note.id, e); }}
+        onDoubleClick={() => setEditing(true)}
+      >
+        {editing ? (
+          <textarea ref={taRef} value={note.text}
+            onChange={(e) => onChange({ ...note, text: e.target.value })}
+            onBlur={() => setEditing(false)}
+            style={{
+              width:'100%', minHeight:(note.h||80)-24, background:'transparent',
+              border:'none', outline:'none', resize:'none',
+              fontFamily:'inherit', fontSize:'inherit', lineHeight:'inherit',
+              fontWeight:'inherit', fontStyle:'inherit', textDecoration:'inherit', color:'inherit',
+            }}
+          />
+        ) : (
+          note.text
+            ? note.text
+            : <span style={{ color:'rgba(15,23,42,0.25)', fontSize:'0.85em' }}>ダブルクリックで編集</span>
+        )}
+
+        {/* 添付画像サムネイル帯 */}
+        {images.length > 0 && !editing && (
+          <div
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{
+              display:'flex', gap:4, flexWrap:'wrap',
+              marginTop:8, paddingTop:6,
+              borderTop:'1px solid rgba(15,23,42,0.1)',
+            }}
+          >
+            {images.map(img => (
+              <ImageThumb
+                key={img.id}
+                img={img}
+                onOpen={onOpenLightbox}
+                onDelete={onDeleteImage ? () => onDeleteImage(note.id, img.id) : null}
+              />
+            ))}
+          </div>
+        )}
+
+        {!editing && (
+          <div onMouseDown={(e) => { e.stopPropagation(); onResizeStart(note.id, e); }}
+            style={{
+              position:'absolute', right:2, bottom:2, width:14, height:14, cursor:'nwse-resize',
+              background:`linear-gradient(135deg,transparent 50%,${t.border} 50% 60%,transparent 60% 72%,${t.border} 72% 82%,transparent 82%)`,
+              opacity: selected ? 0.9 : 0.3, borderBottomRightRadius:5,
+            }}
+          />
+        )}
+
+        {selected && !editing && (
+          <NoteToolbar note={note} types={types} onChange={onChange} onDelete={onDelete} onAttachImage={onAttachImage} />
+        )}
+      </div>
+    );
+  }
+
+  function NoteToolbar({ note, types, onChange, onDelete, onAttachImage }) {
+    const fileInputRef = useRef(null);
+    return (
+      <div style={{
+        position:'absolute', top:-50, left:-2, display:'flex', gap:4, alignItems:'center',
+        background:'#FFFFFF', padding:4, borderRadius:6, zIndex:200, whiteSpace:'nowrap',
+        boxShadow:'0 4px 12px rgba(15,23,42,0.12)', border:'1px solid rgba(15,23,42,0.08)',
+        fontFamily:FONT, fontSize:12,
+      }}>
+        {/* テキスト装飾ボタン */}
+        <button
+          onMouseDown={(e)=>e.stopPropagation()}
+          onClick={(e)=>{e.stopPropagation();onChange({...note,fw:note.fw===700?400:700});}}
+          title="太字"
+          style={{...tinyBtn, fontWeight:700, background:note.fw===700?'#F1F5F9':'#FFFFFF'}}
+        >B</button>
+        <button
+          onMouseDown={(e)=>e.stopPropagation()}
+          onClick={(e)=>{e.stopPropagation();onChange({...note,fontStyle:note.fontStyle==='italic'?'normal':'italic'});}}
+          title="斜体"
+          style={{...tinyBtn, fontStyle:'italic', background:note.fontStyle==='italic'?'#F1F5F9':'#FFFFFF'}}
+        >I</button>
+        <button
+          onMouseDown={(e)=>e.stopPropagation()}
+          onClick={(e)=>{e.stopPropagation();onChange({...note,underline:!note.underline});}}
+          title="下線"
+          style={{...tinyBtn, textDecoration:'underline', background:note.underline?'#F1F5F9':'#FFFFFF'}}
+        >U</button>
+        <button
+          onMouseDown={(e)=>e.stopPropagation()}
+          onClick={(e)=>{e.stopPropagation();onChange({...note,strikethrough:!note.strikethrough});}}
+          title="打ち消し線"
+          style={{...tinyBtn, textDecoration:'line-through', background:note.strikethrough?'#F1F5F9':'#FFFFFF'}}
+        >S</button>
+
+        <VSep />
+
+        {/* タイプ（カラー）変更 */}
+        {types.map(tp => (
+          <button key={tp.id}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onChange({ ...note, type: tp.id }); }}
+            title={tp.label}
+            style={{
+              width:20, height:20, borderRadius:4, padding:0, cursor:'pointer',
+              background:tp.bg, border: note.type===tp.id ? `2px solid ${tp.border}` : '1px solid rgba(15,23,42,0.12)',
+            }}
+          />
+        ))}
+
+        <VSep />
+
+        {/* 画像添付ボタン */}
+        <button
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+          title="画像を添付"
+          style={{ ...tinyBtn }}
+        >📎</button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display:'none' }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => onAttachImage(note.id, ev.target.result);
+            reader.readAsDataURL(file);
+            e.target.value = '';
+          }}
+        />
+
+        <VSep />
+
+        <button
+          onMouseDown={(e)=>e.stopPropagation()}
+          onClick={(e)=>{e.stopPropagation();if(confirm('この付箋を削除しますか?'))onDelete(note.id);}}
+          style={{ ...tinyBtn, color:'#DC2626' }}
+        >削除</button>
+      </div>
+    );
+  }
+
+  /* ── ImageItem（独立画像ノード）── */
+  function ImageItem({ note, selected, onSelect, onDelete, onDragStart, onResizeStart, onOpenLightbox }) {
+    const mouseDownPosRef = useRef(null);
+
+    const handleMouseDown = (e) => {
+      mouseDownPosRef.current = { x: e.clientX, y: e.clientY };
+      onSelect(note.id, e);
+      onDragStart(note.id, e);
+    };
+
+    const handleClick = (e) => {
+      e.stopPropagation();
+      if (mouseDownPosRef.current) {
+        const dx = Math.abs(e.clientX - mouseDownPosRef.current.x);
+        const dy = Math.abs(e.clientY - mouseDownPosRef.current.y);
+        if (dx < 5 && dy < 5) onOpenLightbox(note.src);
+      }
+    };
+
+    return (
+      <div
+        style={{
+          position:'absolute', left:note.x, top:note.y, width:note.w, height:note.h,
+          border: selected ? '2px solid #3B82F6' : '1px solid rgba(15,23,42,0.12)',
+          borderRadius:6, overflow:'hidden', background:'#F8FAFC',
+          boxShadow: selected ? '0 8px 24px rgba(15,23,42,0.12)' : '0 1px 3px rgba(15,23,42,0.06)',
+          cursor:'move', userSelect:'none', zIndex: selected ? 20 : 5,
+        }}
+        onMouseDown={handleMouseDown}
+        onClick={handleClick}
+      >
+        <img src={note.src} alt="" draggable={false}
+          style={{ width:'100%', height:'100%', objectFit:'contain', display:'block', pointerEvents:'none' }}
+        />
+
+        <div
+          onMouseDown={(e) => { e.stopPropagation(); onResizeStart(note.id, e); }}
+          style={{
+            position:'absolute', right:2, bottom:2, width:14, height:14, cursor:'nwse-resize',
+            background:'linear-gradient(135deg,transparent 50%,#64748B 50% 60%,transparent 60% 72%,#64748B 72% 82%,transparent 82%)',
+            opacity: selected ? 0.9 : 0.3, borderBottomRightRadius:5,
+          }}
+        />
+
+        {selected && (
+          <div style={{
+            position:'absolute', top:-46, left:-2, display:'flex', gap:4, alignItems:'center',
+            background:'#FFFFFF', padding:4, borderRadius:6, zIndex:200, whiteSpace:'nowrap',
+            boxShadow:'0 4px 12px rgba(15,23,42,0.12)', border:'1px solid rgba(15,23,42,0.08)',
+            fontFamily:FONT, fontSize:12,
+          }}>
+            <span style={{ fontSize:11, color:'#64748B', padding:'0 4px' }}>画像</span>
+            <VSep />
+            <button
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); if (confirm('この画像を削除しますか?')) onDelete(note.id); }}
+              style={{ ...tinyBtn, color:'#DC2626' }}
+            >削除</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ── ImageModal（ライトボックス）── */
+  function ImageModal({ src, onClose }) {
+    useEffect(() => {
+      const handle = (e) => { if (e.key === 'Escape') onClose(); };
+      window.addEventListener('keydown', handle);
+      return () => window.removeEventListener('keydown', handle);
+    }, [onClose]);
+
+    return (
+      <div
+        style={{
+          position:'fixed', inset:0, zIndex:1000, background:'rgba(0,0,0,0.8)',
+          display:'flex', alignItems:'center', justifyContent:'center',
+        }}
+        onClick={onClose}
+      >
+        <img src={src} alt="" onClick={(e) => e.stopPropagation()}
+          style={{ maxWidth:'90vw', maxHeight:'90vh', objectFit:'contain', borderRadius:8, boxShadow:'0 20px 60px rgba(0,0,0,0.4)' }}
+        />
+        <button
+          onClick={onClose}
+          style={{
+            position:'absolute', top:16, right:16, width:36, height:36, borderRadius:'50%',
+            background:'rgba(255,255,255,0.15)', border:'1px solid rgba(255,255,255,0.3)',
+            color:'#FFFFFF', fontSize:20, cursor:'pointer', display:'flex',
+            alignItems:'center', justifyContent:'center', fontFamily:FONT,
+          }}
+        >×</button>
+      </div>
+    );
+  }
+
+  /* ── Main App ── */
+  function App() {
+    const [notes,         setNotes]         = useState([]);
+    const [noteTypes,     setNoteTypes]     = useState(DEFAULT_TYPES);
+    const [strokes,       setStrokes]       = useState([]);
+    const [selectedIds,   setSelectedIds]   = useState(new Set());
+    const [tool,          setTool]          = useState('select');
+    const [activeType,    setActiveType]    = useState('yellow');
+    const [zoom,          setZoom]          = useState(1);
+    const [selBox,        setSelBox]        = useState(null);
+    const [aiMsg,         setAiMsg]         = useState(null);
+    const [drawingStroke, setDrawingStroke] = useState(null);
+    const [sidebarText,   setSidebarText]   = useState('');
+    const [lightboxSrc,   setLightboxSrc]   = useState(null);
+
+    const [editTypeId,    setEditTypeId]    = useState(null);
+    const [showAddType,   setShowAddType]   = useState(false);
+    const [newTypeLabel,  setNewTypeLabel]  = useState('');
+    const [newTypeBg,     setNewTypeBg]     = useState('#E0F2FE');
+    const [newTypeBorder, setNewTypeBorder] = useState('#0EA5E9');
+
+    const canvasRef       = useRef(null);
+    const historyRef      = useRef([]);
+    const dragRef         = useRef(null);
+    const resizeRef       = useRef(null);
+    const drawRef         = useRef(null);
+    const selStartRef     = useRef(null);
+    const rafRef          = useRef(null);
+    const sidebarTextaRef = useRef(null);
+    const importRef       = useRef(null);
+
+    const selectedIdsRef = useRef(selectedIds);
+    useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+    const notesRef = useRef(notes);
+    useEffect(() => { notesRef.current = notes; }, [notes]);
+
+    /* ── persistence ── */
+    useEffect(() => {
+      try {
+        const s = localStorage.getItem(STORAGE_KEY);
+        if (s) {
+          const d = JSON.parse(s);
+          setNotes(d.notes   || SEED_NOTES);
+          setStrokes(d.strokes || []);
+          if (d.noteTypes && d.noteTypes.length) setNoteTypes(d.noteTypes);
+        } else {
+          setNotes(SEED_NOTES);
+        }
+      } catch { setNotes(SEED_NOTES); }
+    }, []);
+
+    useEffect(() => {
+      if (!notes.length && !strokes.length) return;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ notes, strokes, noteTypes }));
+    }, [notes, strokes, noteTypes]);
+
+    /* ── keyboard shortcuts ── */
+    useEffect(() => {
+      const handle = (e) => {
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+        if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+          e.preventDefault();
+          if (historyRef.current.length) {
+            const prev = historyRef.current.pop();
+            setNotes(prev.notes);
+            setStrokes(prev.strokes);
+            setSelectedIds(new Set());
+          }
+          return;
+        }
+
+        if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.size > 0) {
+          e.preventDefault();
+          pushHistory();
+          setNotes(ns => ns.filter(n => !selectedIds.has(n.id)));
+          setSelectedIds(new Set());
+        }
+      };
+      window.addEventListener('keydown', handle);
+      return () => window.removeEventListener('keydown', handle);
+    }, [selectedIds, notes, strokes]);
+
+    /* クリップボードからの画像ペーストハンドラ */
+    useEffect(() => {
+      const handle = (e) => {
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (const item of items) {
+          if (item.type.startsWith('image/')) {
+            const file = item.getAsFile();
+            if (!file) continue;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const currentNotes = notesRef.current;
+              const currentSelected = selectedIdsRef.current;
+              const targetNote = currentNotes.find(n => !n.kind && currentSelected.has(n.id));
+              if (targetNote) {
+                attachImageToNote(targetNote.id, ev.target.result);
+              } else {
+                addImage(ev.target.result);
+              }
+            };
+            reader.readAsDataURL(file);
+            e.preventDefault();
+            break;
+          }
+        }
+      };
+      window.addEventListener('paste', handle);
+      return () => window.removeEventListener('paste', handle);
+    }, []);
+
+    function pushHistory() {
+      historyRef.current = [
+        ...historyRef.current.slice(-(MAX_HISTORY - 1)),
+        { notes: notes.map(n => ({...n, images: n.images ? n.images.map(img => ({...img})) : undefined})), strokes: strokes.map(s => ({...s, points:[...s.points]})) },
+      ];
+    }
+
+    /* ── note operations ── */
+    function addNote(typeId) {
+      pushHistory();
+      const id = uid();
+      const pos = resolveNewPosition(notes, selectedIds);
+      setNotes(ns => [...ns, { id, x:pos.x, y:pos.y, w:200, h:100, type: typeId || activeType, text:'', fs:14, fw:400 }]);
+      setSelectedIds(new Set([id]));
+    }
+
+    function addNoteWithText(text) {
+      pushHistory();
+      const id = uid();
+      const pos = resolveNewPosition(notes, selectedIds);
+      setNotes(ns => [...ns, { id, x:pos.x, y:pos.y, w:200, h:100, type:activeType, text, fs:14, fw:400 }]);
+      setSelectedIds(new Set([id]));
+    }
+
+    function addImage(src, x, y) {
+      pushHistory();
+      const id = uid();
+      const px = x !== undefined ? x : 40 + Math.random() * 500;
+      const py = y !== undefined ? y : 40 + Math.random() * 400;
+      setNotes(ns => [...ns, { id, kind:'image', x:px, y:py, w:200, h:150, src }]);
+      setSelectedIds(new Set([id]));
+    }
+
+    function attachImageToNote(noteId, src) {
+      pushHistory();
+      const imgId = uid();
+      setNotes(ns => ns.map(n =>
+        n.id === noteId
+          ? { ...n, images: [...(n.images || []), { id: imgId, src }] }
+          : n
+      ));
+    }
+
+    function deleteImageFromNote(noteId, imgId) {
+      pushHistory();
+      setNotes(ns => ns.map(n =>
+        n.id === noteId
+          ? { ...n, images: (n.images || []).filter(img => img.id !== imgId) }
+          : n
+      ));
+    }
+
+    function updateNote(updated) {
+      setNotes(ns => ns.map(n => n.id === updated.id ? updated : n));
+    }
+
+    function deleteNote(id) {
+      pushHistory();
+      setNotes(ns => ns.filter(n => n.id !== id));
+      setSelectedIds(prev => { const s = new Set(prev); s.delete(id); return s; });
+    }
+
+    function deleteAllNotes() {
+      if (!confirm(`付箋を全て削除しますか？（${notes.length}枚）\nこの操作は元に戻せません。`)) return;
+      pushHistory();
+      setNotes([]);
+      setSelectedIds(new Set());
+    }
+
+    function deleteSelectedNotes() {
+      if (!selectedIds.size) return;
+      if (!confirm(`選択中の付箋 ${selectedIds.size}枚を削除しますか?`)) return;
+      pushHistory();
+      setNotes(ns => ns.filter(n => !selectedIds.has(n.id)));
+      setSelectedIds(new Set());
+    }
+
+    /* ── drag ── */
+    function onDragStart(id, e) {
+      const pt = getCanvasPt(e, canvasRef, zoom);
+      if (selectedIds.has(id) && selectedIds.size > 1) {
+        const offsets = {};
+        notes.forEach(n => {
+          if (selectedIds.has(n.id)) offsets[n.id] = { ox: pt.x - n.x, oy: pt.y - n.y };
+        });
+        dragRef.current = { mode:'group', offsets };
+      } else {
+        const note = notes.find(n => n.id === id);
+        dragRef.current = { mode:'single', id, ox: pt.x - note.x, oy: pt.y - note.y };
+      }
+      e.preventDefault();
+    }
+
+    function onResizeStart(id, e) {
+      const note = notes.find(n => n.id === id);
+      if (!note) return;
+      resizeRef.current = { id, sx: e.clientX, sy: e.clientY, sw: note.w, sh: note.h };
+      e.preventDefault();
+    }
+
+    /* ── canvas mouse events ── */
+    function onCanvasMouseDown(e) {
+      if (tool === 'pen') {
+        if (!canvasRef.current) return;
+        const pt = getCanvasPt(e, canvasRef, zoom);
+        const stroke = { id:uid(), points:[[pt.x,pt.y]], color:'#3B82F6' };
+        drawRef.current = stroke;
+        setDrawingStroke({ id:stroke.id, color:stroke.color, points:[[pt.x,pt.y]] });
+        return;
+      }
+      if (tool === 'select') {
+        const el = e.target;
+        if (el === canvasRef.current || el.dataset.bg === '1') {
+          setSelectedIds(new Set());
+          const pt = getCanvasPt(e, canvasRef, zoom);
+          selStartRef.current = pt;
+          setSelBox(null);
+        }
+      }
+    }
+
+    function onCanvasMouseMove(e) {
+      if (!canvasRef.current) return;
+
+      if (dragRef.current) {
+        const pt = getCanvasPt(e, canvasRef, zoom);
+        const d = dragRef.current;
+        if (d.mode === 'group') {
+          setNotes(ns => ns.map(n => {
+            const off = d.offsets[n.id];
+            return off ? { ...n, x: Math.max(0, pt.x - off.ox), y: Math.max(0, pt.y - off.oy) } : n;
+          }));
+        } else {
+          setNotes(ns => ns.map(n => n.id === d.id ? { ...n, x: Math.max(0, pt.x - d.ox), y: Math.max(0, pt.y - d.oy) } : n));
+        }
+        return;
+      }
+      if (resizeRef.current) {
+        const { id, sx, sy, sw, sh } = resizeRef.current;
+        const nw = Math.max(120, sw + (e.clientX - sx) / zoom);
+        const nh = Math.max(70,  sh + (e.clientY - sy) / zoom);
+        setNotes(ns => ns.map(n => n.id === id ? { ...n, w:nw, h:nh } : n));
+        return;
+      }
+      if (tool === 'pen' && drawRef.current) {
+        const pt = getCanvasPt(e, canvasRef, zoom);
+        const pts = drawRef.current.points;
+        const last = pts[pts.length - 1];
+        if (last && Math.hypot(pt.x - last[0], pt.y - last[1]) < 3) return;
+        drawRef.current.points.push([pt.x, pt.y]);
+        if (!rafRef.current) {
+          rafRef.current = requestAnimationFrame(() => {
+            rafRef.current = null;
+            if (drawRef.current) {
+              setDrawingStroke({ id:drawRef.current.id, color:drawRef.current.color, points:[...drawRef.current.points] });
+            }
+          });
+        }
+        return;
+      }
+      if (selStartRef.current && tool === 'select') {
+        const pt = getCanvasPt(e, canvasRef, zoom);
+        const sx = Math.min(selStartRef.current.x, pt.x);
+        const sy = Math.min(selStartRef.current.y, pt.y);
+        const sw = Math.abs(pt.x - selStartRef.current.x);
+        const sh = Math.abs(pt.y - selStartRef.current.y);
+        setSelBox({ x:sx, y:sy, w:sw, h:sh });
+      }
+    }
+
+    function onCanvasMouseUp(e) {
+      if (dragRef.current) {
+        pushHistory();
+        dragRef.current = null;
+      }
+      if (resizeRef.current) {
+        pushHistory();
+        resizeRef.current = null;
+      }
+      if (tool === 'pen' && drawRef.current) {
+        if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+        pushHistory();
+        setStrokes(ss => [...ss, { id:drawRef.current.id, color:drawRef.current.color, points:[...drawRef.current.points] }]);
+        setDrawingStroke(null);
+        drawRef.current = null;
+      }
+      if (selStartRef.current) {
+        if (selBox && (selBox.w > 4 || selBox.h > 4)) {
+          const sel = new Set(notes.filter(n =>
+            n.x < selBox.x + selBox.w && n.x + n.w > selBox.x &&
+            n.y < selBox.y + selBox.h && n.y + n.h > selBox.y
+          ).map(n => n.id));
+          setSelectedIds(sel);
+        }
+        selStartRef.current = null;
+        setSelBox(null);
+      }
+    }
+
+    function onSelectNote(id, e) {
+      if (e.shiftKey) {
+        setSelectedIds(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
+      } else {
+        if (!selectedIds.has(id)) setSelectedIds(new Set([id]));
+      }
+    }
+
+    /* ── zoom ── */
+    function onWheel(e) {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        setZoom(z => Math.min(3, Math.max(0.25, z * (e.deltaY < 0 ? 1.1 : 0.9))));
+      }
+    }
+
+    /* キャンバスへの画像ドラッグ&ドロップ */
+    function onCanvasDragOver(e) {
+      if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+    }
+
+    function onCanvasFileDrop(e) {
+      e.preventDefault();
+      const files = Array.from(e.dataTransfer.files).filter(f => /^image\/(jpeg|png|gif|webp)$/.test(f.type));
+      if (!files.length) return;
+      const targetNote = notes.find(n => !n.kind && selectedIds.has(n.id));
+      if (targetNote) {
+        files.forEach((file) => {
+          const reader = new FileReader();
+          reader.onload = (ev) => attachImageToNote(targetNote.id, ev.target.result);
+          reader.readAsDataURL(file);
+        });
+      } else {
+        const pt = getCanvasPt(e, canvasRef, zoom);
+        files.forEach((file, i) => {
+          const reader = new FileReader();
+          reader.onload = (ev) => addImage(ev.target.result, pt.x + i * 20, pt.y + i * 20);
+          reader.readAsDataURL(file);
+        });
+      }
+    }
+
+    /* ── note types management ── */
+    function addNoteType() {
+      if (!newTypeLabel.trim()) return;
+      const id = uid();
+      setNoteTypes(ts => [...ts, { id, bg:newTypeBg, border:newTypeBorder, label:newTypeLabel.trim() }]);
+      setNewTypeLabel('');
+      setNewTypeBg('#E0F2FE');
+      setNewTypeBorder('#0EA5E9');
+      setShowAddType(false);
+    }
+
+    function renameType(id, label) {
+      setNoteTypes(ts => ts.map(t => t.id === id ? { ...t, label } : t));
+    }
+
+    /* 種類の背景色・枠線色を更新する */
+    function updateTypeColor(id, key, value) {
+      setNoteTypes(ts => ts.map(t => t.id === id ? { ...t, [key]: value } : t));
+    }
+
+    function deleteNoteType(id) {
+      if (noteTypes.length <= 1) return;
+      const fallback = noteTypes.find(t => t.id !== id)?.id || noteTypes[0].id;
+      setNotes(ns => ns.map(n => n.type === id ? { ...n, type: fallback } : n));
+      setNoteTypes(ts => ts.filter(t => t.id !== id));
+    }
+
+    /* ── AI summaries ── */
+    const summarizeAll = async () => {
+      const textNotes = notes.filter(n => n.kind !== 'image');
+      if (!textNotes.length) return;
+      setAiMsg({ kind:'loading', text:'要約中...' });
+      try {
+        const prompt = `以下の付箋メモを眺めて、キャンバス全体で「何が起きているか」を日本語で3〜5行で要約してください。決まったこと・未決のこと・次にやることが見えたら優先して。\n\n${textNotes.map((n,i)=>`[${i+1}] ${n.text}`).join('\n')}`;
+        const reply = await window.claude.complete(prompt);
+        setAiMsg({ kind:'summary', text:reply });
+      } catch(err) { setAiMsg({ kind:'err', text:'要約に失敗: '+err.message }); }
+    };
+
+    const summarizeByType = async (typeId) => {
+      const ns = notes.filter(n => n.type === typeId);
+      const t = getType(noteTypes, typeId);
+      if (!ns.length) { setAiMsg({ kind:'err', text:`「${t.label}」の付箋はまだありません。` }); return; }
+      setAiMsg({ kind:'loading', text:`「${t.label}」(${ns.length}枚) を要約中...` });
+      try {
+        const prompt = `以下は「${t.label}」の付箋(${ns.length}枚)です。共通テーマを一行で述べ、重要ポイントを箇条書き3〜5個でまとめてください。\n\n${ns.map((n,i)=>`[${i+1}] ${n.text}`).join('\n')}`;
+        const reply = await window.claude.complete(prompt);
+        setAiMsg({ kind:'type-summary', typeId, text:reply });
+      } catch(err) { setAiMsg({ kind:'err', text:'要約に失敗: '+err.message }); }
+    };
+
+    function resetAll() {
+      if (!confirm('全てリセットしますか？（付箋・ペン描画）')) return;
+      pushHistory();
+      setNotes(SEED_NOTES);
+      setStrokes([]);
+      setSelectedIds(new Set());
+      setAiMsg(null);
+    }
+
+    /* ── データ管理 ── */
+    function exportData() {
+      const data = { notes, strokes, noteTypes };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `canvas-notes-${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function importData(e) {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target.result);
+          if (!confirm('現在のデータを上書きしますか？')) return;
+          pushHistory();
+          if (data.notes)    setNotes(data.notes);
+          if (data.strokes)  setStrokes(data.strokes);
+          if (data.noteTypes && data.noteTypes.length) setNoteTypes(data.noteTypes);
+          setSelectedIds(new Set());
+        } catch { alert('ファイルの読み込みに失敗しました。正しいJSONファイルか確認してください。'); }
+      };
+      reader.readAsText(file);
+      e.target.value = '';
+    }
+
+    /* ── render ── */
+    function submitSidebarNote() {
+      if (!sidebarText.trim()) return;
+      addNoteWithText(sidebarText.trim());
+      setSidebarText('');
+    }
+
+    return (
+      <div style={{ width:'100vw', height:'100vh', display:'flex', background:'#F8FAFC', fontFamily:FONT, color:'#0F172A' }}>
+
+          {/* ── Canvas ── */}
+          <div
+            ref={canvasRef}
+            onMouseDown={onCanvasMouseDown}
+            onMouseMove={onCanvasMouseMove}
+            onMouseUp={onCanvasMouseUp}
+            onMouseLeave={onCanvasMouseUp}
+            onWheel={onWheel}
+            onDragOver={onCanvasDragOver}
+            onDrop={onCanvasFileDrop}
+            style={{
+              flex:1, position:'relative', overflow:'auto', cursor:'default',
+            }}
+          >
+            <div style={{ width: CANVAS_W*zoom, height: CANVAS_H*zoom, position:'relative', flexShrink:0 }}>
+              <div style={{ transform:`scale(${zoom})`, transformOrigin:'top left', width:CANVAS_W, height:CANVAS_H, position:'absolute', top:0, left:0 }} data-bg="1">
+                {/* ドットグリッド背景 */}
+                <div data-bg="1" style={{
+                  position:'absolute', inset:0, pointerEvents:'none',
+                  backgroundImage:'radial-gradient(circle,#CBD5E1 1px,transparent 1px)',
+                  backgroundSize:'24px 24px',
+                }} />
+
+                {/* SVG: ペンストローク + 描画中プレビュー + 選択ボックス */}
+                <svg width={CANVAS_W} height={CANVAS_H} style={{ position:'absolute', left:0, top:0, pointerEvents:'none', zIndex:50 }}>
+                  {strokes.map(s=>(
+                    <polyline key={s.id}
+                      points={s.points.map(p=>p.join(',')).join(' ')}
+                      fill="none" stroke={s.color} strokeWidth={2}
+                      strokeLinecap="round" strokeLinejoin="round"
+                    />
+                  ))}
+                  {drawingStroke && (
+                    <polyline
+                      points={drawingStroke.points.map(p=>p.join(',')).join(' ')}
+                      fill="none" stroke={drawingStroke.color} strokeWidth={2}
+                      strokeLinecap="round" strokeLinejoin="round"
+                    />
+                  )}
+                  {selBox && (
+                    <rect x={selBox.x} y={selBox.y} width={selBox.w} height={selBox.h}
+                      fill="rgba(59,130,246,0.06)" stroke="#3B82F6" strokeWidth={1.5} strokeDasharray="5 3" rx={4}
+                    />
+                  )}
+                </svg>
+
+                {notes.map(n => n.kind === 'image' ? (
+                  <ImageItem
+                    key={n.id}
+                    note={n}
+                    selected={selectedIds.has(n.id)}
+                    onSelect={onSelectNote}
+                    onDelete={deleteNote}
+                    onDragStart={onDragStart}
+                    onResizeStart={onResizeStart}
+                    onOpenLightbox={setLightboxSrc}
+                  />
+                ) : (
+                  <StickyNote
+                    key={n.id}
+                    note={n}
+                    types={noteTypes}
+                    selected={selectedIds.has(n.id)}
+                    onSelect={onSelectNote}
+                    onChange={updateNote}
+                    onDelete={deleteNote}
+                    onDragStart={onDragStart}
+                    onResizeStart={onResizeStart}
+                    onOpenLightbox={setLightboxSrc}
+                    onAttachImage={attachImageToNote}
+                    onDeleteImage={deleteImageFromNote}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Right panel ── */}
+          <div style={{ width:288, borderLeft:'1px solid #E2E8F0', background:'#FFFFFF', display:'flex', flexDirection:'column', overflowY:'auto', flexShrink:0 }}>
+            <div style={{ padding:16, display:'flex', flexDirection:'column', gap:18 }}>
+
+              {/* 新しい付箋を作成 */}
+              <Section title="新しい付箋">
+                {/* カラー選択 */}
+                <div style={{ display:'flex', gap:4, marginBottom:8 }}>
+                  {noteTypes.map(t=>(
+                    <button key={t.id} onClick={()=>setActiveType(t.id)} title={t.label}
+                      style={{
+                        flex:1, height:30, borderRadius:6, padding:0, cursor:'pointer',
+                        background:t.bg, fontSize:11, fontFamily:FONT, color:'#0F172A', fontWeight:500,
+                        border:activeType===t.id?`2.5px solid ${t.border}`:'1.5px solid #E2E8F0',
+                        transition:'border 0.1s',
+                      }}
+                    >{t.label}</button>
+                  ))}
+                </div>
+                {/* テキスト入力 */}
+                <textarea
+                  ref={sidebarTextaRef}
+                  value={sidebarText}
+                  onChange={e=>setSidebarText(e.target.value)}
+                  onKeyDown={e=>{
+                    if ((e.metaKey || e.ctrlKey) && e.key==='Enter') {
+                      e.preventDefault();
+                      submitSidebarNote();
+                    }
+                  }}
+                  placeholder={'メモを入力…\n（⌘Enter で追加）'}
+                  style={{
+                    width:'100%', minHeight:100, fontSize:13,
+                    border:`1.5px solid ${sidebarText.trim() ? getType(noteTypes,activeType).border : '#E2E8F0'}`,
+                    borderRadius:6, padding:'8px 12px', outline:'none',
+                    fontFamily:FONT, color:'#0F172A',
+                    resize:'vertical', lineHeight:1.6,
+                    background: sidebarText.trim() ? getType(noteTypes,activeType).bg : '#FAFAFA',
+                    transition:'border 0.15s, background 0.15s',
+                  }}
+                />
+                <button
+                  onClick={submitSidebarNote}
+                  disabled={!sidebarText.trim()}
+                  style={{
+                    ...primaryBtn, marginTop:6,
+                    background:sidebarText.trim()?'#0F172A':'#E2E8F0',
+                    color:sidebarText.trim()?'#FFFFFF':'#94A3B8',
+                    cursor:sidebarText.trim()?'pointer':'not-allowed',
+                    transition:'background 0.15s',
+                  }}
+                >付箋を追加</button>
+              </Section>
+
+              <HR />
+
+              {/* 付箋の種類 */}
+              <Section title="付箋の種類">
+                <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                  {noteTypes.map(t=>(
+                    <div key={t.id} style={{ display:'flex', alignItems:'flex-start', gap:6 }}>
+                      <div style={{ width:14, height:14, marginTop:3, borderRadius:3, background:t.bg, border:`2px solid ${t.border}`, flexShrink:0 }} />
+                      {editTypeId===t.id ? (
+                        <div style={{ flex:1, display:'flex', flexDirection:'column', gap:4 }}>
+                          <input
+                            autoFocus value={t.label}
+                            onChange={(e)=>renameType(t.id,e.target.value)}
+                            onKeyDown={(e)=>{ if(e.key==='Enter')setEditTypeId(null); }}
+                            style={{ width:'100%', fontSize:12, border:'1px solid #CBD5E1', borderRadius:4, padding:'2px 6px', outline:'none' }}
+                          />
+                          <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                            <label style={{ fontSize:10, color:'#64748B' }}>背景</label>
+                            <input type="color" value={t.bg} onChange={(e)=>updateTypeColor(t.id,'bg',e.target.value)} style={{ width:24, height:24 }} />
+                            <label style={{ fontSize:10, color:'#64748B' }}>枠線</label>
+                            <input type="color" value={t.border} onChange={(e)=>updateTypeColor(t.id,'border',e.target.value)} style={{ width:24, height:24 }} />
+                            <button onClick={()=>setEditTypeId(null)} style={{ ...iconBtn, fontSize:11, color:'#10B981' }}>✓</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <span style={{ flex:1, fontSize:12, paddingTop:2 }}>{t.label}</span>
+                      )}
+                      {editTypeId!==t.id && (
+                        <>
+                          <button onClick={()=>setEditTypeId(t.id)} style={iconBtn} title="名前・色を変更">✎</button>
+                          {noteTypes.length > 1 && (
+                            <button onClick={()=>deleteNoteType(t.id)} style={{ ...iconBtn, color:'#DC2626' }} title="削除">×</button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {showAddType ? (
+                  <div style={{ marginTop:8, padding:8, background:'#F8FAFC', borderRadius:6, border:'1px solid #E2E8F0', display:'flex', flexDirection:'column', gap:6 }}>
+                    <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                      <input
+                        autoFocus placeholder="種類名" value={newTypeLabel}
+                        onChange={(e)=>setNewTypeLabel(e.target.value)}
+                        onKeyDown={(e)=>{ if(e.key==='Enter') addNoteType(); }}
+                        style={{ flex:1, fontSize:12, border:'1px solid #CBD5E1', borderRadius:4, padding:'4px 8px', outline:'none' }}
+                      />
+                    </div>
+                    <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                      <div>
+                        <div style={{ fontSize:10, color:'#64748B', marginBottom:2 }}>背景</div>
+                        <input type="color" value={newTypeBg} onChange={(e)=>setNewTypeBg(e.target.value)} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize:10, color:'#64748B', marginBottom:2 }}>枠線</div>
+                        <input type="color" value={newTypeBorder} onChange={(e)=>setNewTypeBorder(e.target.value)} />
+                      </div>
+                      <div style={{ flex:1, height:28, background:newTypeBg, border:`2px solid ${newTypeBorder}`, borderRadius:4 }} />
+                    </div>
+                    <div style={{ display:'flex', gap:6 }}>
+                      <button onClick={addNoteType} style={{ ...primaryBtn, flex:1, padding:'6px 0' }}>追加</button>
+                      <button onClick={()=>setShowAddType(false)} style={{ ...secBtn, flex:1, padding:'6px 0' }}>キャンセル</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={()=>setShowAddType(true)} style={{ ...secBtn, marginTop:8, fontSize:12 }}>+ 種類を追加</button>
+                )}
+              </Section>
+
+              <HR />
+
+              {/* まとめる */}
+              <Section title="まとめる">
+                <button onClick={summarizeAll} style={primaryBtn}>全体を要約する</button>
+                <button onClick={deleteAllNotes} style={{ ...dangerBtn, marginTop:6 }}>付箋を全て削除</button>
+              </Section>
+
+              <HR />
+
+              {/* 種類ごとにまとめる */}
+              <Section title="種類ごとにまとめる" subtitle="同じ種類の付箋だけ要約">
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6 }}>
+                  {noteTypes.map(t=>{
+                    const count = notes.filter(n=>n.type===t.id).length;
+                    return (
+                      <button key={t.id} onClick={()=>summarizeByType(t.id)} disabled={count===0}
+                        style={{
+                          padding:'8px', border:`1px solid ${count>0?t.border:'#E2E8F0'}`, borderLeft:`3px solid ${count>0?t.border:'#CBD5E1'}`,
+                          borderRadius:6, background:count>0?t.bg:'#F8FAFC', fontFamily:FONT, fontSize:13, fontWeight:500,
+                          cursor:count===0?'not-allowed':'pointer', opacity:count===0?0.4:1, textAlign:'left', color:'#0F172A',
+                        }}
+                      >
+                        <div style={{ fontWeight:600 }}>{t.label}</div>
+                        <div style={{ fontSize:11, color:'#64748B', marginTop:2 }}>{count} 枚</div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {aiMsg && (
+                  <div style={{
+                    marginTop:12, borderRadius:6, padding:12, fontSize:13, lineHeight:1.7,
+                    whiteSpace:'pre-wrap', color:'#0F172A',
+                    background: aiMsg.typeId ? getType(noteTypes,aiMsg.typeId).bg : '#F8FAFC',
+                    border: `1px solid ${aiMsg.typeId ? getType(noteTypes,aiMsg.typeId).border : '#E2E8F0'}`,
+                    borderLeft: `3px solid ${aiMsg.typeId ? getType(noteTypes,aiMsg.typeId).border : '#3B82F6'}`,
+                  }}>
+                    <div style={{ fontWeight:600, fontSize:11, color:'#475569', marginBottom:6 }}>
+                      {aiMsg.kind==='loading' ? '処理中…'
+                       : aiMsg.kind==='summary' ? '全体の要約'
+                       : aiMsg.kind==='type-summary' ? `「${getType(noteTypes,aiMsg.typeId).label}」の要約`
+                       : 'エラー'}
+                    </div>
+                    {aiMsg.text}
+                  </div>
+                )}
+              </Section>
+
+              <HR />
+
+              <HR />
+
+              {/* データ管理 */}
+              <Section title="データ管理">
+                <div style={{ display:'flex', gap:6 }}>
+                  <button onClick={exportData}
+                    style={{ ...secBtn, flex:1, fontSize:12 }}
+                  >書き出し (JSON)</button>
+                  <button onClick={()=>importRef.current?.click()}
+                    style={{ ...secBtn, flex:1, fontSize:12 }}
+                  >読み込み</button>
+                  <input
+                    ref={importRef} type="file" accept=".json"
+                    style={{ display:'none' }}
+                    onChange={importData}
+                  />
+                </div>
+                <div style={{ fontSize:10, color:'#94A3B8', marginTop:4, lineHeight:1.5 }}>
+                  JSONファイルで保存・復元できます。<br />GitHub Pagesでの運用にも対応しています。
+                </div>
+              </Section>
+
+              <HR />
+
+              {/* 操作ガイド */}
+              <div style={{ padding:10, fontSize:11, color:'#64748B', lineHeight:1.7, background:'#F8FAFC', borderRadius:6, border:'1px solid #E2E8F0' }}>
+                <strong style={{ color:'#0F172A', display:'block', marginBottom:4 }}>操作ガイド</strong>
+                ダブルクリック: 編集<br />
+                Shift+クリック: 複数選択<br />
+                キャンバスをドラッグ: 範囲選択<br />
+                Delete / ⌫: 選択した付箋を削除<br />
+                ⌘Z / Ctrl+Z: 操作を元に戻す<br />
+                ⌘スクロール: ズーム<br />
+                <strong style={{ color:'#0F172A' }}>付箋を選択 + ⌘V:</strong> 画像を添付<br />
+                <strong style={{ color:'#0F172A' }}>付箋を選択 + ドロップ:</strong> 画像を添付<br />
+                📎ボタン: ファイルから画像を添付<br />
+                サムネイルをクリック: 拡大表示
+              </div>
+
+            </div>
+          </div>
+
+      {lightboxSrc && <ImageModal src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
+      </div>
+    );
+  }
+
+  /* ── Sub-components ── */
+  function Section({ title, subtitle, action, children }) {
+    return (
+      <div>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: subtitle?2:8 }}>
+          <span style={{ fontSize:13, fontWeight:700, color:'#0F172A' }}>{title}</span>
+          {action}
+        </div>
+        {subtitle && <div style={{ fontSize:11, color:'#64748B', marginBottom:8 }}>{subtitle}</div>}
+        {children}
+      </div>
+    );
+  }
+
+  function HR() { return <div style={{ height:1, background:'#E2E8F0' }} />; }
+  function VSep() { return <div style={{ width:1, height:20, background:'rgba(15,23,42,0.1)', margin:'0 1px' }} />; }
+
+  /* ── Style constants ── */
+  const primaryBtn = {
+    padding:'8px 12px', border:'none', borderRadius:6,
+    fontFamily:FONT, fontWeight:700, fontSize:13,
+    cursor:'pointer', background:'#0F172A', color:'#FFFFFF', width:'100%',
+  };
+  const secBtn = {
+    padding:'7px 12px', border:'1px solid #E2E8F0', borderRadius:6,
+    background:'#FFFFFF', fontFamily:FONT, fontSize:12, fontWeight:500,
+    cursor:'pointer', color:'#0F172A', width:'100%',
+  };
+  const dangerBtn = {
+    padding:'8px 12px', border:'1px solid #FECACA', borderRadius:6,
+    fontFamily:FONT, fontWeight:500, fontSize:13,
+    cursor:'pointer', background:'#FEF2F2', color:'#DC2626', width:'100%',
+  };
+  const tinyBtn = {
+    padding:'3px 8px', border:'1px solid rgba(15,23,42,0.12)', background:'#FFFFFF',
+    borderRadius:4, cursor:'pointer', fontFamily:FONT, fontSize:12, color:'#0F172A',
+  };
+  const iconBtn = {
+    padding:'2px 6px', border:'1px solid transparent', background:'transparent',
+    borderRadius:4, cursor:'pointer', fontFamily:FONT, fontSize:12, color:'#64748B',
+  };
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
